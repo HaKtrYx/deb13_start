@@ -12,7 +12,7 @@ BASE_PKGS=(
   uidmap slirp4netns fuse-overlayfs
 )
 
-# Podman + compose integration on Debian.
+# Podman + compose integration on Debian
 PODMAN_PKGS=(
   podman
   podman-compose
@@ -52,15 +52,21 @@ sanitize_username() {
 }
 
 gen_password() {
-  # Letters + digits + selected symbols; avoid ':' and spaces (chpasswd-safe)
+  # Letters + digits + symbols; chpasswd-safe
+  # NOTE: '-' MUST be first or last in tr set
   local pw
   while true; do
-    pw="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_-+=.?,' </dev/urandom | head -c "$PASS_LEN")"
+    pw="$(
+      LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_=+.?,-' </dev/urandom \
+        | head -c "$PASS_LEN"
+    )"
+
     [[ "${#pw}" -eq "$PASS_LEN" ]] || continue
     [[ "$pw" =~ [A-Z] ]] || continue
     [[ "$pw" =~ [a-z] ]] || continue
     [[ "$pw" =~ [0-9] ]] || continue
-    [[ "$pw" =~ [\!\@\#\$\%\^\&\*\_\-\+\=\.\?,] ]] || continue
+    [[ "$pw" =~ [\!\@\#\$\%\^\&\*\_\=\+\.\?,\-] ]] || continue
+
     printf '%s' "$pw"
     return 0
   done
@@ -84,7 +90,7 @@ ensure_user_and_sudo() {
   if [[ "$NOPASSWD_SUDO" == "1" ]]; then
     local sudoers_file="/etc/sudoers.d/$user"
     printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > "$sudoers_file"
-    install -m 0440 /dev/null "$sudoers_file" 2>/dev/null || chmod 0440 "$sudoers_file"
+    chmod 0440 "$sudoers_file"
   fi
 }
 
@@ -103,11 +109,9 @@ ensure_subid_range() {
 enable_rootless_podman() {
   local user="$1"
 
-  # Ensure subuid/subgid ranges exist for rootless containers
   ensure_subid_range /etc/subuid "$user"
   ensure_subid_range /etc/subgid "$user"
 
-  # Optional: enable lingering so user services can run without being logged in
   if command -v loginctl >/dev/null 2>&1; then
     loginctl enable-linger "$user" >/dev/null 2>&1 || true
   fi
@@ -120,7 +124,7 @@ print_next_steps() {
 ====================
 READY
 User:     ${user}
-Note:     Use 'podman-compose' or 'podman compose' depending on what you prefer.
+Note:     Use 'podman-compose' or 'podman compose' as you prefer.
 ====================
 
 Try rootless:
@@ -128,10 +132,9 @@ Try rootless:
   podman info
   podman run --rm quay.io/podman/hello
 
-Compose (common):
+Compose:
   podman-compose up -d
-
-If you prefer 'podman compose', install the compose provider you like and run:
+  # or
   podman compose up -d
 
 EOF
@@ -156,7 +159,7 @@ main() {
   log "Setting up rootless Podman mappings..."
   enable_rootless_podman "$user"
 
-  log "Generating ${PASS_LEN}-char password (letters+numbers+symbols)..."
+  log "Generating ${PASS_LEN}-char password..."
   pw="$(gen_password)"
 
   log "Setting password..."
