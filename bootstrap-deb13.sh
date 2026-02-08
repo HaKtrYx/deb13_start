@@ -19,8 +19,8 @@ PODMAN_PKGS=(
 )
 
 PASS_LEN=16
-NOPASSWD_SUDO=1
 
+# Rootless subuid/subgid range
 SUBID_START=100000
 SUBID_COUNT=65536
 
@@ -78,19 +78,10 @@ install_packages() {
   apt-get install -y "${BASE_PKGS[@]}" "${PODMAN_PKGS[@]}"
 }
 
-ensure_user_and_sudo() {
+ensure_user() {
   local user="$1"
-
   if ! id -u "$user" >/dev/null 2>&1; then
     useradd -m -s /bin/bash "$user"
-  fi
-
-  usermod -aG sudo "$user"
-
-  if [[ "$NOPASSWD_SUDO" == "1" ]]; then
-    local sudoers_file="/etc/sudoers.d/$user"
-    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > "$sudoers_file"
-    chmod 0440 "$sudoers_file"
   fi
 }
 
@@ -112,6 +103,7 @@ enable_rootless_podman() {
   ensure_subid_range /etc/subuid "$user"
   ensure_subid_range /etc/subgid "$user"
 
+  # Optional: allow user services when not logged in
   if command -v loginctl >/dev/null 2>&1; then
     loginctl enable-linger "$user" >/dev/null 2>&1 || true
   fi
@@ -124,11 +116,13 @@ print_next_steps() {
 ====================
 READY
 User:     ${user}
-Note:     Use 'podman-compose' or 'podman compose' as you prefer.
+Note:     This user is NOT a sudoer.
 ====================
 
-Try rootless:
+Login:
   su - ${user}
+
+Try rootless Podman:
   podman info
   podman run --rm quay.io/podman/hello
 
@@ -153,8 +147,8 @@ main() {
   log "Installing packages..."
   install_packages
 
-  log "Creating/configuring user + sudo..."
-  ensure_user_and_sudo "$user"
+  log "Creating user (no sudo)..."
+  ensure_user "$user"
 
   log "Setting up rootless Podman mappings..."
   enable_rootless_podman "$user"
