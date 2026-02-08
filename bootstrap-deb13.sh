@@ -1,47 +1,62 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ---- baseline tools ----
+# ----------------------------
+# Config
+# ----------------------------
 BASE_PKGS=(
   sudo vim tree
   curl wget git
   htop tmux
   ca-certificates gnupg
+  uidmap slirp4netns fuse-overlayfs
 )
 
-# ---- docker pkgs (includes compose plugin) ----
-DOCKER_PKGS=(
-  docker-ce docker-ce-cli containerd.io
-  docker-buildx-plugin docker-compose-plugin
+# Podman + compose integration on Debian.
+PODMAN_PKGS=(
+  podman
+  podman-compose
 )
 
 PASS_LEN=16
 NOPASSWD_SUDO=1
 
+SUBID_START=100000
+SUBID_COUNT=65536
+
+# ----------------------------
+# Helpers
+# ----------------------------
+log() { echo "[*] $*"; }
+die() { echo "[!] $*" >&2; exit 1; }
+
 require_root() {
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    echo "Run as root." >&2
-    exit 1
-  fi
+  local euid="${EUID:-$(id -u)}"
+  [[ "$euid" -eq 0 ]] || die "Run as root."
 }
 
 sanitize_username() {
-  # username based on hostname, safe for Linux useradd
   local raw="$1"
   local u
-  u="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
-  [[ -z "$u" ]] && u="user"
+
+  u="$(
+    echo "$raw" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//'
+  )"
+
+  [[ -n "$u" ]] || u="user"
   [[ "$u" =~ ^[a-z] ]] || u="u-$u"
+
   echo "$u"
 }
 
 gen_password() {
-  # Letters + digits + symbols, exclude ':' and whitespace (chpasswd-safe)
-  # Try until it contains at least 1 upper, 1 lower, 1 digit, 1 symbol.
+  # Letters + digits + selected symbols; avoid ':' and spaces (chpasswd-safe)
   local pw
   while true; do
-    pw="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_-+=.?,' </dev/urandom | head -c "${PASS_LEN}")"
-    [[ "${#pw}" -ne "${PASS_LEN}" ]] && continue
+    pw="$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*_-+=.?,' </dev/urandom | head -c "$PASS_LEN")"
+    [[ "${#pw}" -eq "$PASS_LEN" ]] || continue
     [[ "$pw" =~ [A-Z] ]] || continue
     [[ "$pw" =~ [a-z] ]] || continue
     [[ "$pw" =~ [0-9] ]] || continue
@@ -51,33 +66,13 @@ gen_password() {
   done
 }
 
-install_base() {
+install_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y "${BASE_PKGS[@]}"
+  apt-get install -y "${BASE_PKGS[@]}" "${PODMAN_PKGS[@]}"
 }
 
-install_docker_official() {
-  # Official Docker repo for Debian (Debian 13 / trixie supported)  [oai_citation:2‡Docker Documentation](https://docs.docker.com/engine/install/debian/?utm_source=chatgpt.com)
-  install -m 0755 -d /etc/apt/keyrings
-  if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
-    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
-  fi
-
-  local arch codename
-  arch="$(dpkg --print-architecture)"
-  codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
-
-  cat > /etc/apt/sources.list.d/docker.list <<EOF
-deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${codename} stable
-EOF
-
-  apt-get update
-  apt-get install -y "${DOCKER_PKGS[@]}"
-}
-
-ensure_user() {
+ensure_user_and_sudo() {
   local user="$1"
 
   if ! id -u "$user" >/dev/null 2>&1; then
@@ -86,4 +81,90 @@ ensure_user() {
 
   usermod -aG sudo "$user"
 
-  if [[ "$NOPASSWD_SUDO" == "1"
+  if [[ "$NOPASSWD_SUDO" == "1" ]]; then
+    local sudoers_file="/etc/sudoers.d/$user"
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > "$sudoers_file"
+    install -m 0440 /dev/null "$sudoers_file" 2>/dev/null || chmod 0440 "$sudoers_file"
+  fi
+}
+
+set_password() {
+  local user="$1" pw="$2"
+  printf '%s:%s\n' "$user" "$pw" | chpasswd
+}
+
+ensure_subid_range() {
+  local file="$1" user="$2"
+  if ! grep -qE "^${user}:" "$file" 2>/dev/null; then
+    printf '%s:%s:%s\n' "$user" "$SUBID_START" "$SUBID_COUNT" >> "$file"
+  fi
+}
+
+enable_rootless_podman() {
+  local user="$1"
+
+  # Ensure subuid/subgid ranges exist for rootless containers
+  ensure_subid_range /etc/subuid "$user"
+  ensure_subid_range /etc/subgid "$user"
+
+  # Optional: enable lingering so user services can run without being logged in
+  if command -v loginctl >/dev/null 2>&1; then
+    loginctl enable-linger "$user" >/dev/null 2>&1 || true
+  fi
+}
+
+print_next_steps() {
+  local user="$1"
+  cat <<EOF
+
+====================
+READY
+User:     ${user}
+Note:     Use 'podman-compose' or 'podman compose' depending on what you prefer.
+====================
+
+Try rootless:
+  su - ${user}
+  podman info
+  podman run --rm quay.io/podman/hello
+
+Compose (common):
+  podman-compose up -d
+
+If you prefer 'podman compose', install the compose provider you like and run:
+  podman compose up -d
+
+EOF
+}
+
+main() {
+  require_root
+
+  local host user pw
+  host="$(hostname -s)"
+  user="$(sanitize_username "$host")"
+
+  log "Hostname: $host"
+  log "User:     $user"
+
+  log "Installing packages..."
+  install_packages
+
+  log "Creating/configuring user + sudo..."
+  ensure_user_and_sudo "$user"
+
+  log "Setting up rootless Podman mappings..."
+  enable_rootless_podman "$user"
+
+  log "Generating ${PASS_LEN}-char password (letters+numbers+symbols)..."
+  pw="$(gen_password)"
+
+  log "Setting password..."
+  set_password "$user" "$pw"
+
+  echo
+  echo "Password: $pw"
+  print_next_steps "$user"
+}
+
+main "$@"
